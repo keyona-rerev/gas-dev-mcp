@@ -1,0 +1,14 @@
+{
+  "name": "gas-dev-mcp",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.mjs",
+  "scripts": {
+    "start": "node index.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "node-fetch": "^3.0.0",
+    "zod": "^3.0.0"
+  }
+}
