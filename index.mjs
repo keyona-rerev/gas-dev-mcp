@@ -119,6 +119,11 @@ function buildServer() {
     }
   );
 
+  const existing = await script.projects.getContent({ scriptId });
+  const manifest = existing.data.files?.find(f => f.name === 'appsscript');
+
+  if (manifest && !files.some(f => f.name === 'appsscript')) files = [manifest, ...files];
+  
   server.tool(
     "gas_update_project",
     "Update the files in a GAS project. Pass the complete array of files — any file not included will be deleted. Always include ALL files, not just the ones you changed.",
