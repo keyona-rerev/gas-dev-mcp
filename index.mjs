@@ -119,11 +119,6 @@ function buildServer() {
     }
   );
 
-  const existing = await script.projects.getContent({ scriptId });
-  const manifest = existing.data.files?.find(f => f.name === 'appsscript');
-
-  if (manifest && !files.some(f => f.name === 'appsscript')) files = [manifest, ...files];
-  
   server.tool(
     "gas_update_project",
     "Update the files in a GAS project. Pass the complete array of files — any file not included will be deleted. Always include ALL files, not just the ones you changed.",
@@ -136,8 +131,13 @@ function buildServer() {
       })).describe("Complete list of all files in the project"),
     },
     async (p) => {
-      const data = await api("PUT", `/projects/${p.scriptId}/content`, { files: p.files });
-      return { content: [{ type: "text", text: JSON.stringify({ success: true, scriptId: p.scriptId, fileCount: p.files.length }, null, 2) }] };
+      const existing = await api("GET", `/projects/${p.scriptId}/content`);
+      const manifest = (existing.files || []).find(f => f.name === "appsscript");
+      const files = (manifest && !p.files.some(f => f.name === "appsscript"))
+        ? [manifest, ...p.files]
+        : p.files;
+      const data = await api("PUT", `/projects/${p.scriptId}/content`, { files });
+      return { content: [{ type: "text", text: JSON.stringify({ success: true, scriptId: p.scriptId, fileCount: files.length }, null, 2) }] };
     }
   );
 
