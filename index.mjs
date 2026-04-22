@@ -1,6 +1,8 @@
 // ============================================================
-// index.mjs — Google Apps Script Developer MCP (SSE Transport)
+// index.mjs — Google Apps Script Developer MCP
 // ReRev Labs | Deploy on Railway
+// Transport: Streamable HTTP (MCP protocol 2025-11-25)
+// Migrated from SSE — SSE deprecated by Claude April 2026
 // ============================================================
 // Environment variables required:
 //   GOOGLE_CLIENT_ID      — OAuth client ID from Google Cloud Console
@@ -9,10 +11,11 @@
 // ============================================================
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import fetch from "node-fetch";
 import http from "http";
+import { randomUUID } from "crypto";
 
 const CLIENT_ID     = process.env.GOOGLE_CLIENT_ID;
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
@@ -86,10 +89,11 @@ async function driveApi(method, path, body) {
   return json;
 }
 
-const transports = new Map();
+// Session store for Streamable HTTP transport
+const sessions = new Map();
 
 function buildServer() {
-  const server = new McpServer({ name: "gas-developer", version: "1.0.0" });
+  const server = new McpServer({ name: "gas-developer", version: "2.0.0" });
 
   server.tool(
     "gas_list_projects",
@@ -136,7 +140,7 @@ function buildServer() {
       const files = (manifest && !p.files.some(f => f.name === "appsscript"))
         ? [manifest, ...p.files]
         : p.files;
-      const data = await api("PUT", `/projects/${p.scriptId}/content`, { files });
+      await api("PUT", `/projects/${p.scriptId}/content`, { files });
       return { content: [{ type: "text", text: JSON.stringify({ success: true, scriptId: p.scriptId, fileCount: files.length }, null, 2) }] };
     }
   );
@@ -221,33 +225,60 @@ function buildServer() {
 
 const httpServer = http.createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept, Mcp-Session-Id");
 
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
+  // Health check
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", service: "gas-developer-mcp" }));
+    res.end(JSON.stringify({ status: "ok", service: "gas-developer-mcp", transport: "streamable-http" }));
     return;
   }
 
-  if (req.method === "GET" && req.url === "/mcp") {
-    const server = buildServer();
-    const transport = new SSEServerTransport("/messages", res);
-    transports.set(transport.sessionId, transport);
-    res.on("close", () => transports.delete(transport.sessionId));
-    await server.connect(transport);
-    return;
-  }
+  // Streamable HTTP transport — single /mcp endpoint handles all methods
+  if (req.url === "/mcp" || req.url.startsWith("/mcp?")) {
+    // Reuse existing session if Mcp-Session-Id header present
+    const sessionId = req.headers["mcp-session-id"];
 
-  if (req.method === "POST" && req.url.startsWith("/messages")) {
-    const url = new URL(req.url, "http://localhost");
-    const sessionId = url.searchParams.get("sessionId");
-    const transport = transports.get(sessionId);
-    if (!transport) { res.writeHead(404); res.end(JSON.stringify({ error: "Session not found" })); return; }
-    await transport.handlePostMessage(req, res);
-    return;
+    if (req.method === "DELETE") {
+      // Client is closing the session
+      if (sessionId && sessions.has(sessionId)) {
+        const { transport } = sessions.get(sessionId);
+        await transport.close();
+        sessions.delete(sessionId);
+      }
+      res.writeHead(204); res.end();
+      return;
+    }
+
+    if (req.method === "GET" || req.method === "POST") {
+      let transport;
+      let server;
+
+      if (sessionId && sessions.has(sessionId)) {
+        // Existing session
+        ({ transport, server } = sessions.get(sessionId));
+      } else {
+        // New session
+        const newSessionId = randomUUID();
+        server = buildServer();
+        transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => newSessionId,
+          onsessioninitialized: (sid) => {
+            sessions.set(sid, { transport, server });
+          },
+        });
+        transport.onclose = () => {
+          sessions.delete(newSessionId);
+        };
+        await server.connect(transport);
+      }
+
+      await transport.handleRequest(req, res);
+      return;
+    }
   }
 
   res.writeHead(404);
@@ -255,5 +286,5 @@ const httpServer = http.createServer(async (req, res) => {
 });
 
 httpServer.listen(PORT, () => {
-  console.log(`GAS Developer MCP (SSE) running on port ${PORT}`);
+  console.log(`GAS Developer MCP (Streamable HTTP) running on port ${PORT}`);
 });
