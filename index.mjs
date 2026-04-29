@@ -115,11 +115,54 @@ function buildServer() {
 
   server.tool(
     "gas_get_project",
-    "Get the full content of a GAS project — all .gs files and HTML files. Returns file names and source code.",
+    "Get the full content of a GAS project — all .gs files and HTML files. Returns file names and source code. NOTE: For large projects (8+ files) this response may be truncated. Use gas_list_project_files to see the file list first, then gas_get_file to read individual files.",
     { scriptId: z.string().describe("The script ID (from gas_list_projects)") },
     async (p) => {
       const data = await api("GET", `/projects/${p.scriptId}/content`);
       return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "gas_list_project_files",
+    "List all files in a GAS project — returns file names and types only, no source code. Use this first to see what files exist, then use gas_get_file to read individual files. Safe to use on any size project.",
+    { scriptId: z.string().describe("The script ID of the project") },
+    async (p) => {
+      const data = await api("GET", `/projects/${p.scriptId}/content`);
+      const files = (data.files || []).map(f => ({
+        name: f.name,
+        type: f.type,
+        updateTime: f.updateTime || null,
+      }));
+      return { content: [{ type: "text", text: JSON.stringify({ scriptId: p.scriptId, files }, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "gas_get_file",
+    "Get the source code of a single named file from a GAS project. Use this instead of gas_get_project for large projects to avoid response truncation.",
+    {
+      scriptId: z.string().describe("The script ID of the project"),
+      filename: z.string().describe("Name of the file without extension (e.g. 'Config', 'Dashboard')"),
+    },
+    async (p) => {
+      const data = await api("GET", `/projects/${p.scriptId}/content`);
+      const file = (data.files || []).find(f => f.name === p.filename);
+      if (!file) {
+        const names = (data.files || []).map(f => f.name).join(", ");
+        throw new Error(`File "${p.filename}" not found. Available files: ${names}`);
+      }
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            name: file.name,
+            type: file.type,
+            source: file.source,
+            updateTime: file.updateTime || null,
+          }, null, 2)
+        }]
+      };
     }
   );
 
