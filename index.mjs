@@ -146,6 +146,56 @@ function buildServer() {
   );
 
   server.tool(
+    "gas_update_file",
+    "Update a single file in a GAS project without needing to pass all files. Fetches the current project server-side, replaces only the target file, and pushes the full updated array back. Use this instead of gas_update_project for large projects to avoid payload size limits.",
+    {
+      scriptId: z.string().describe("The script ID of the project"),
+      filename: z.string().describe("Name of the file to update, without extension (e.g. 'Code', 'Dashboard')"),
+      source: z.string().describe("The complete new source code for this file"),
+    },
+    async (p) => {
+      // Step 1: Fetch current project fresh from Google
+      const existing = await api("GET", `/projects/${p.scriptId}/content`);
+      const currentFiles = existing.files || [];
+
+      // Step 2: Find the target file
+      const targetIndex = currentFiles.findIndex(f => f.name === p.filename);
+      if (targetIndex === -1) {
+        throw new Error(`File "${p.filename}" not found in project. Existing files: ${currentFiles.map(f => f.name).join(", ")}`);
+      }
+
+      // Step 3: Swap source for target file only, preserve everything else including manifest
+      const updatedFiles = currentFiles.map(f => {
+        if (f.name === p.filename) {
+          return { name: f.name, type: f.type, source: p.source };
+        }
+        return f;
+      });
+
+      // Step 4: Push full updated array back
+      await api("PUT", `/projects/${p.scriptId}/content`, { files: updatedFiles });
+
+      // Step 5: Verify — re-fetch and confirm the file landed
+      const verified = await api("GET", `/projects/${p.scriptId}/content`);
+      const verifiedFile = (verified.files || []).find(f => f.name === p.filename);
+      const landed = verifiedFile && verifiedFile.source === p.source;
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            success: true,
+            scriptId: p.scriptId,
+            filename: p.filename,
+            verified: landed,
+            totalFiles: updatedFiles.length,
+          }, null, 2)
+        }]
+      };
+    }
+  );
+
+  server.tool(
     "gas_create_project",
     "Create a new Google Apps Script project.",
     {
@@ -239,11 +289,9 @@ const httpServer = http.createServer(async (req, res) => {
 
   // Streamable HTTP transport — single /mcp endpoint handles all methods
   if (req.url === "/mcp" || req.url.startsWith("/mcp?")) {
-    // Reuse existing session if Mcp-Session-Id header present
     const sessionId = req.headers["mcp-session-id"];
 
     if (req.method === "DELETE") {
-      // Client is closing the session
       if (sessionId && sessions.has(sessionId)) {
         const { transport } = sessions.get(sessionId);
         await transport.close();
@@ -258,10 +306,8 @@ const httpServer = http.createServer(async (req, res) => {
       let server;
 
       if (sessionId && sessions.has(sessionId)) {
-        // Existing session
         ({ transport, server } = sessions.get(sessionId));
       } else {
-        // New session
         const newSessionId = randomUUID();
         server = buildServer();
         transport = new StreamableHTTPServerTransport({
