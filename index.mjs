@@ -95,13 +95,6 @@ const sessions = new Map();
 function buildServer() {
   const server = new McpServer({ name: "gas-developer", version: "2.1.0" });
 
-  // Session-level instructions — injected into Claude's context at connection time
-  server.setInstructions(
-    "When working with Google Apps Script projects, always start by calling gas_list_project_files to get the complete file inventory. " +
-    "Use gas_get_file for reading individual files and gas_update_file for making changes to a single file. " +
-    "Avoid gas_update_project unless you need to rewrite all files at once; if you use it, call gas_list_project_files first and set forceDelete: true only after confirming which files should be removed."
-  );
-
   server.tool(
     "gas_list_projects",
     "List all Google Apps Script projects in the connected Google account. Returns scriptId, title, and createTime.",
@@ -125,21 +118,16 @@ function buildServer() {
     "Get the full content of a GAS project (all files with source). Validates completeness against a metadata preflight — throws a clear error if the Google API returns a truncated response, directing you to use gas_list_project_files + gas_get_file instead.",
     { scriptId: z.string().describe("The script ID (from gas_list_projects)") },
     async (p) => {
-      // Preflight: get reliable file count using metadata-only call (tiny payload, never truncated)
       const meta = await api("GET", `/projects/${p.scriptId}/content?fields=files(name,type)`);
       const expectedCount = (meta.files || []).length;
-
-      // Full content fetch
       const full = await api("GET", `/projects/${p.scriptId}/content`);
       const receivedCount = (full.files || []).length;
-
       if (receivedCount !== expectedCount) {
         throw new Error(
           `Incomplete response: expected ${expectedCount} files but received ${receivedCount}. ` +
           `The project is too large for a single API call. Use 'gas_list_project_files' for the file inventory, then 'gas_get_file' for each file's source.`
         );
       }
-
       return { content: [{ type: "text", text: JSON.stringify(full, null, 2) }] };
     }
   );
@@ -149,7 +137,6 @@ function buildServer() {
     "List all files in a GAS project — names and types only, no source code. Always returns the complete file inventory even for very large projects. Use this first before any read or write operation to establish the current file baseline.",
     { scriptId: z.string().describe("The script ID of the project") },
     async (p) => {
-      // Use fields param to request metadata only — response is tiny, never truncated by Google API
       const data = await api("GET", `/projects/${p.scriptId}/content?fields=files(name,type)`);
       return { content: [{ type: "text", text: JSON.stringify({ scriptId: p.scriptId, files: data.files || [] }, null, 2) }] };
     }
@@ -163,25 +150,19 @@ function buildServer() {
       filename: z.string().describe("Name of the file without extension (e.g. 'Config', 'Dashboard')"),
     },
     async (p) => {
-      // Preflight: reliable file list
       const meta = await api("GET", `/projects/${p.scriptId}/content?fields=files(name,type)`);
       const expectedNames = (meta.files || []).map(f => f.name);
-
       if (!expectedNames.includes(p.filename)) {
         throw new Error(`File "${p.filename}" not found. Available files: ${expectedNames.join(", ")}`);
       }
-
-      // Full fetch for source — validated against preflight
       const full = await api("GET", `/projects/${p.scriptId}/content`);
       const file = (full.files || []).find(f => f.name === p.filename);
-
       if (!file) {
         throw new Error(
           `File "${p.filename}" missing from full fetch (Google API may have truncated the response). ` +
           `Expected ${expectedNames.length} files. Try again or report the truncation.`
         );
       }
-
       return {
         content: [{
           type: "text",
@@ -210,11 +191,9 @@ function buildServer() {
         .describe("Must be set to true to allow pushing fewer files than the current project has (i.e., to permanently delete files)."),
     },
     async (p) => {
-      // Preflight: get current file count using safe metadata-only call
       const meta = await api("GET", `/projects/${p.scriptId}/content?fields=files(name,type)`);
       const existingCount = (meta.files || []).length;
       const incomingCount = p.files.length;
-
       if (incomingCount < existingCount && !p.forceDelete) {
         throw new Error(
           `⚠️ REFUSED: This push would delete ${existingCount - incomingCount} file(s). ` +
@@ -222,19 +201,13 @@ function buildServer() {
           `Call gas_list_project_files to see what exists, then either include all files or set forceDelete: true to confirm the deletion.`
         );
       }
-
-      // Preserve manifest
       const manifest = (meta.files || []).find(f => f.name === "appsscript");
       const finalFiles = (manifest && !p.files.some(f => f.name === "appsscript"))
         ? [manifest, ...p.files]
         : p.files;
-
       await api("PUT", `/projects/${p.scriptId}/content`, { files: finalFiles });
-
-      // Verify final state
       const verify = await api("GET", `/projects/${p.scriptId}/content?fields=files(name)`);
       const finalCount = (verify.files || []).length;
-
       return {
         content: [{
           type: "text",
@@ -258,15 +231,11 @@ function buildServer() {
       source: z.string().describe("The complete new source code for this file"),
     },
     async (p) => {
-      // Step 1: Reliable file list — confirms file exists and gives us expected count
       const meta = await api("GET", `/projects/${p.scriptId}/content?fields=files(name,type)`);
       const expectedNames = (meta.files || []).map(f => f.name);
-
       if (!expectedNames.includes(p.filename)) {
         throw new Error(`File "${p.filename}" not found. Available files: ${expectedNames.join(", ")}`);
       }
-
-      // Step 2: Full fetch — validated against preflight count
       const full = await api("GET", `/projects/${p.scriptId}/content`);
       if ((full.files || []).length !== expectedNames.length) {
         throw new Error(
@@ -275,24 +244,16 @@ function buildServer() {
           `Use gas_get_file to read individual files; report this truncation.`
         );
       }
-
       const currentFiles = full.files;
-
-      // Step 3: Swap only the target file
       const updatedFiles = currentFiles.map(f =>
         f.name === p.filename
           ? { name: f.name, type: f.type, source: p.source }
           : f
       );
-
-      // Step 4: Push full updated array back
       await api("PUT", `/projects/${p.scriptId}/content`, { files: updatedFiles });
-
-      // Step 5: Verify the file landed
       const verified = await api("GET", `/projects/${p.scriptId}/content`);
       const verifiedFile = (verified.files || []).find(f => f.name === p.filename);
       const landed = verifiedFile && verifiedFile.source === p.source;
-
       return {
         content: [{
           type: "text",
@@ -393,14 +354,12 @@ const httpServer = http.createServer(async (req, res) => {
 
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
-  // Health check
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ status: "ok", service: "gas-developer-mcp", version: "2.1.0", transport: "streamable-http" }));
     return;
   }
 
-  // Streamable HTTP transport — single /mcp endpoint handles all methods
   if (req.url === "/mcp" || req.url.startsWith("/mcp?")) {
     const sessionId = req.headers["mcp-session-id"];
 
