@@ -93,7 +93,7 @@ async function driveApi(method, path, body) {
 const sessions = new Map();
 
 function buildServer() {
-  const server = new McpServer({ name: "gas-developer", version: "2.1.0" });
+  const server = new McpServer({ name: "gas-developer", version: "2.2.0" });
 
   server.tool(
     "gas_list_projects",
@@ -171,6 +171,63 @@ function buildServer() {
             type: file.type,
             source: file.source,
             updateTime: file.updateTime || null,
+          }, null, 2)
+        }]
+      };
+    }
+  );
+
+  server.tool(
+    "gas_add_file",
+    "Add a single new .gs or .html file to an existing GAS project without touching any other files. Use this to create a file that does not yet exist. If the file already exists, use gas_update_file instead.",
+    {
+      scriptId: z.string().describe("The script ID of the project"),
+      filename: z.string().describe("Name of the new file without extension (e.g. 'PiperDraftSender', 'Dashboard')"),
+      type: z.enum(["SERVER_JS", "HTML"]).describe("SERVER_JS for .gs files, HTML for .html files"),
+      source: z.string().describe("The full source code for the new file"),
+    },
+    async (p) => {
+      // Read current project state
+      const meta = await api("GET", `/projects/${p.scriptId}/content?fields=files(name,type)`);
+      const existingNames = (meta.files || []).map(f => f.name);
+
+      if (existingNames.includes(p.filename)) {
+        throw new Error(
+          `File "${p.filename}" already exists in this project. Use gas_update_file to modify it.`
+        );
+      }
+
+      const full = await api("GET", `/projects/${p.scriptId}/content`);
+      if ((full.files || []).length !== existingNames.length) {
+        throw new Error(
+          `Project content fetch was incomplete: expected ${existingNames.length} files but got ${(full.files || []).length}. ` +
+          `Cannot safely add file — doing so could overwrite existing files. Try again.`
+        );
+      }
+
+      // Append new file and push
+      const updatedFiles = [
+        ...full.files,
+        { name: p.filename, type: p.type, source: p.source },
+      ];
+
+      await api("PUT", `/projects/${p.scriptId}/content`, { files: updatedFiles });
+
+      // Verify the file landed
+      const verified = await api("GET", `/projects/${p.scriptId}/content`);
+      const newFile = (verified.files || []).find(f => f.name === p.filename);
+      const landed = newFile && newFile.source === p.source;
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            success: landed,
+            scriptId: p.scriptId,
+            filename: p.filename,
+            type: p.type,
+            verified: landed,
+            totalFiles: (verified.files || []).length,
           }, null, 2)
         }]
       };
@@ -356,7 +413,7 @@ const httpServer = http.createServer(async (req, res) => {
 
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", service: "gas-developer-mcp", version: "2.1.0", transport: "streamable-http" }));
+    res.end(JSON.stringify({ status: "ok", service: "gas-developer-mcp", version: "2.2.0", transport: "streamable-http" }));
     return;
   }
 
@@ -404,5 +461,5 @@ const httpServer = http.createServer(async (req, res) => {
 });
 
 httpServer.listen(PORT, () => {
-  console.log(`GAS Developer MCP (Streamable HTTP) v2.1.0 running on port ${PORT}`);
+  console.log(`GAS Developer MCP (Streamable HTTP) v2.2.0 running on port ${PORT}`);
 });
